@@ -3,7 +3,6 @@
 #include <cassert>
 #include "spdlog/spdlog.h"
 #include "spdlog/fmt/bin_to_hex.h"
-#include "SspCrc.h"
 
 void SspEmul::execute(const std::string& portName)
 {
@@ -19,93 +18,82 @@ void SspEmul::execute(const std::string& portName)
 	port.open();
 	port.setDTR(true);
 
-	bool s = false;
-	uint8_t seqSlaveId = 0;
-	std::vector<uint8_t> data;
-	for (;;)
-	{
-		uint8_t b;
+	state = State::sync;
+	lastByteWasStx = false;
 
-		if (!s)
-		{
-			readByteStxDedup(s, seqSlaveId);
-			continue;
-		}
-
-		if ((seqSlaveId & 0x7f) != NoteValidator0)
-		{
-			spdlog::warn("received seqSlaveId: {0:x}", seqSlaveId);
-			s = false;
-			continue;
-		}
-
-		SspCrc sspCrc;
-		sspCrc.update(seqSlaveId);
-
-		uint8_t l = readByteStxDedup(s, seqSlaveId);
-		if (s)
-			continue;
-
-		sspCrc.update(l);
-		data.clear();
-
-		while (l--)
-		{
-			b = readByteStxDedup(s, seqSlaveId);
-			if (s)
-				break;
-			sspCrc.update(b);
-			data.push_back(b);
-		}
-
-		if (s)
-			continue;
-
-		uint8_t crcl = readByteStxDedup(s, seqSlaveId);
-		if (s)
-			continue;
-
-		uint8_t crch = readByteStxDedup(s, seqSlaveId);
-		if (s)
-			continue;
-
-		if (sspCrc.getCrcL() != crcl || sspCrc.getCrcH() != crch)
-		{
-			spdlog::warn("invalid packet crc");
-			s = false;
-			continue;
-		}
-
-		spdlog::info("received packet: {}", spdlog::to_hex(data));
-	}
-}
-
-uint8_t SspEmul::readByte()
-{
 	for (;;)
 	{
 		uint8_t b;
 		size_t r = port.read(&b, 1);
+		assert(r == 0 || r == 1);
 		if (r == 1)
-			return b;
-		assert(r == 0);
+			processByte(b);
 	}
 }
 
-uint8_t SspEmul::readByteStxDedup(bool& resync, uint8_t& seqSlaveId)
+void SspEmul::processByte(uint8_t b)
 {
-	resync = false;
-
-	uint8_t b = readByte();
-	if (b == STX)
+	if (lastByteWasStx)
 	{
-		b = readByte();
-		if (b != STX)
+		lastByteWasStx = false;
+
+		if (b == STX)
+			return;
+		 
+		state = State::sync;
+
+		if ((b & 0x7f) == NoteValidator0)
 		{
-			seqSlaveId = b;
-			resync = true;
+			sspCrc.reset();
+			sspCrc.update(b);
+			data.clear();
+			state = State::len;
+			return;
 		}
 	}
 
-	return b;
+	lastByteWasStx = (b == STX);
+
+	switch (state)
+	{
+	case State::sync:
+		break;
+
+	case State::len:
+		dataLen = b;
+		sspCrc.update(b);
+		if (dataLen)
+			state = State::data;
+		else
+			state = State::crcL;
+		break;
+
+	case State::data:
+		sspCrc.update(b);
+		data.push_back(b);
+		--dataLen;
+		if (!dataLen)
+			state = State::crcL;
+		break;
+
+	case State::crcL:
+		if (b != sspCrc.getCrcL())
+			state = State::sync;
+		else
+			state = State::crcH;
+		break;
+
+	case State::crcH:
+		if (b != sspCrc.getCrcH())
+			state = State::sync;
+		else
+		{
+			spdlog::info("received: {}", spdlog::to_hex(data));
+			state = State::sync;
+		}
+		break;
+
+	default:
+		throw std::exception();
+	}
 }
