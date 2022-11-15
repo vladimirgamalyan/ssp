@@ -1,15 +1,10 @@
 #include <iostream>
 #include <string>
-
 #define DOCTEST_CONFIG_IMPLEMENT
-#include "external/doctest.h"
-
-#include "external/CLI11.hpp"
-
-TEST_CASE("foo test") 
-{
-    CHECK(2 * 2 == 4);
-}
+#include "doctest.h"
+#include "CLI11.hpp"
+#include "SspEmul.h"
+#include "spdlog/spdlog.h"
 
 int main(int argc, char* argv[])
 {
@@ -18,6 +13,8 @@ int main(int argc, char* argv[])
 	if (context.shouldExit() || res)
 		return res;
 
+	spdlog::set_pattern("[%8o] [%L] %v");
+
 	CLI::App app{ "SSP" };
 	std::string portName;
 	app.add_option("-p,--port", portName, "Serial port name")->required();
@@ -25,11 +22,17 @@ int main(int argc, char* argv[])
 	try
 	{
 		app.parse(argc, argv);
+		SspEmul sspEmul;
+		sspEmul.execute(portName);
 	}
 	catch (const CLI::ParseError& e)
 	{
 		return app.exit(e);
 	}
+	catch (const std::exception& e)
+	{
+		spdlog::error("{}", e.what());
+	}
 
-	std::cout << portName << '\n';
+	return 0;
 }
